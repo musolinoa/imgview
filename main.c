@@ -4,6 +4,7 @@
 #include <thread.h>
 #include <keyboard.h>
 #include <mouse.h>
+#include <ctype.h>
 #include "dat.h"
 #include "fns.h"
 
@@ -42,42 +43,216 @@ trimsuffix(char *s, char *suf)
 	}
 }
 
-Album*
-openalbum(void)
+static int
+isyear(char *s)
 {
-	int dfd;
-	Dir *dirs;
+	int i;
+
+	for(i = 0; i < 4; i++){
+		if(!isdigit(*s++))
+			return 0;
+	}
+	return *s == 0;
+}
+
+static int
+month(char *s)
+{
+	switch(*s++){
+	case '0':
+		if('1' <= *s && *s <= '9')
+			return *s - '0' - 1;
+		break;
+	case '1':
+		if('0' <= *s && *s <= '2')
+			return *s - '0' + 9;
+		break;
+	}
+	return -1;
+}
+
+static int
+dircmp(void *va, void *vb)
+{
+	Dir *da, *db;
+
+	da = va;
+	db = vb;
+	return strcmp(da->name, db->name);
+}
+
+static int
+rdircmp(void *va, void *vb)
+{
+	return -dircmp(va, vb);
+}
+
+static int
+dirforeach(char *path, int (*fn)(char *path, Dir*, void*), void *aux)
+{
+	int fd;
+	Dir *entries, *e;
 	long n;
+
+	fd = open(path, OREAD);
+	if(fd < 0)
+		return -1;
+	n = dirreadall(fd, &entries);
+	close(fd);
+	qsort(entries, n, sizeof(*entries), dircmp);
+	e = entries;
+	while(n-- > 0){
+		if(fn(path, e, aux) < 0)
+			goto Error;
+		e++;
+	}
+	return 0;
+Error:
+	free(entries);
+	return -1;
+}
+
+static int
+openimgdb1(char *path, Dir *e, void *a)
+{
+	ImgDB *db;
+	YearIdx *year;
+	char buf[1024];
+
+	db = a;
+	if((e->mode&DMDIR) == 0)
+		return 0;
+	if(!isyear(e->name))
+		return 0;
+	snprint(buf, sizeof(buf), "%s/%s", path, e->name);
+	year = openyearidx(buf);
+	if(year == nil)
+		return -1;
+	if(db->years != nil)
+		db->years->next = year;
+	year->prev = db->years;
+	db->years = year;
+	return 1;
+}
+
+ImgDB*
+openimgdb(char *path)
+{
+	ImgDB *db;
+
+	if((db = mallocz(sizeof(ImgDB), 1)) == nil)
+		return nil;
+	if(dirforeach(path, openimgdb1, db) < 0){
+		freeimgdb(db);
+		return nil;
+	}
+	return db;
+}
+
+void
+freeimgdb(ImgDB *db)
+{
+	YearIdx *y, *tmp;
+
+	if(db == nil)
+		return;
+	y = db->years;
+	while(y != nil){
+		tmp = y;
+		y = y->next;
+		freeyearidx(tmp);
+	}
+	free(db);
+}
+
+static int
+openyearidx1(char *path, Dir *e, void *a)
+{
+	int m;
+	YearIdx *year;
+	Album *album;
+	char buf[1024];
+
+	year = a;
+	if((e->mode&DMDIR) == 0)
+		return 0;
+	if((m = month(e->name)) < 0)
+		return 0;
+	snprint(buf, sizeof(buf), "%s/%s", path, e->name);
+	album = openalbum(buf);
+	if(album == nil)
+		return -1;
+	album->up = year;
+	album->month = m;
+	year->months[m] = album;
+	return 1;
+}
+
+YearIdx*
+openyearidx(char *path)
+{
+	YearIdx *year;
+
+	if((year = mallocz(sizeof(YearIdx), 1)) != nil)
+	if((year->name = strdup(path)) != nil)
+	if(dirforeach(path, openyearidx1, year) >= 0)
+		return year;
+	freeyearidx(year);
+	return nil;
+}
+
+void
+freeyearidx(YearIdx *year)
+{
+	int i;
+
+	if(year == nil)
+		return;
+	for(i = 0; i < 12; i++)
+		freealbum(year->months[i]);
+	free(year);
+}
+
+static int
+openalbum1(char *path, Dir *e, void *a)
+{
 	Album *album;
 	AlbumImg *img;
+	char buf[1024];
 
-	dirs = nil;
+	album = a;
+	if((e->mode&DMDIR) != 0)
+		return 0;
+	if(!endswith(e->name, ".thumb.1"))
+		return 0;
+	snprint(buf, sizeof(buf), "%s/%s", path, e->name);
+	img = loadalbumimg(buf);
+	if(img == nil)
+		return -1;
+	img->up = album;
+	if(album->images.head == nil){
+		album->images.head = img;
+	}else{
+		album->images.tail->next = img;
+		img->prev = album->images.tail;
+	}
+	album->images.tail = img;
+	return 1;
+}
+
+Album*
+openalbum(char *path)
+{
+	Album *album;
+
 	album = mallocz(sizeof(Album), 1);
 	if(album == nil)
-		goto Error;
-	dfd = open(".", OREAD);
-	if(dfd < 0)
-		goto Error;
-	n = dirreadall(dfd, &dirs);
-	close(dfd);
-	while(n-- > 0){
-		if((dirs[n].mode&DMDIR) == 0)
-		if(endswith(dirs[n].name, ".thumb.1") != 0){
-			img = loadalbumimg(dirs[n].name);
-			if(img == nil)
-				goto Error;
-			img->album = album;
-			if(album->images != nil)
-				album->images->prev = img;
-			img->next = album->images;
-			album->images = img;
-		}
+		return nil;
+	if(dirforeach(path, openalbum1, album) < 0){
+		freealbum(album);
+		return nil;
 	}
 	return album;
-Error:
-	free(dirs);
-	freealbum(album);
-	return nil;
 }
 
 Image *
@@ -100,7 +275,6 @@ loadalbumimg(char *path)
 	AlbumImg *aimg;
 	Image *img;
 
-	aimg = nil;
 	img = load9img(path);
 	if(img == nil)
 		goto Error;
@@ -112,13 +286,14 @@ loadalbumimg(char *path)
 	return aimg;
 Error:
 	free(img);
-	freealbumimg(aimg);
 	return nil;
 }
 
 void
 freealbumimg(AlbumImg *img)
 {
+	if(img == nil)
+		return;
 	free(img->name);
 	free(img->thumb);
 	free(img);
@@ -129,7 +304,9 @@ freealbum(Album *album)
 {
 	AlbumImg *img, *tmp;
 
-	img = album->images;
+	if(album == nil)
+		return;
+	img = album->images.head;
 	while(img != nil){
 		tmp = img;
 		img = img->next;
@@ -150,7 +327,7 @@ reflow(Album *a, Rectangle bbox)
 	Rectangle r;
 
 	r = bbox;
-	for(i = a->images; i != nil; i = i->next){
+	for(i = a->images.head; i != nil; i = i->next){
 		if(i->thumb == nil)
 			continue;
 		w = Dx(i->thumb->r);
@@ -168,6 +345,7 @@ reflow(Album *a, Rectangle bbox)
 	}
 }
 
+static ImgDB *db;
 static Album *album;
 
 void
@@ -186,7 +364,7 @@ drawthumb(AlbumImg *i)
 		draw(screen, r, display->black, nil, ZP);
 		draw(screen, insetrect(r, 1), display->white, nil, ZP);
 		draw(screen, insetrect(r, 3), fill, nil, ZP);
-	}else if(i->album->hover == i){
+	}else if(i->up->hover == i){
 		draw(screen, r, display->black, nil, ZP);
 		draw(screen, insetrect(r, 1), display->white, nil, ZP);
 	}
@@ -197,17 +375,22 @@ resized(int new)
 {
 	Rectangle box;
 	AlbumImg *img;
+	char buf[1024];
 
 	if(new && getwindow(display, Refnone) < 0)
 		sysfatal("getwindow: %r");
 	draw(screen, screen->r, display->black, nil, ZP);
 	box = screen->r;
 	box.min.x += Spacing;
+	snprint(buf, sizeof(buf), "%s/%02d", album->up->name, album->month + 1);
+	string(screen, box.min, display->white, ZP, display->defaultfont, buf);
+	box = screen->r;
+	box.min.x += Spacing;
 	box.min.y += 40;
 	box.min.y -= Spacing;
 	box.max.y -= 40;
 	reflow(album, box);
-	for(img = album->images; img != nil; img = img->next){
+	for(img = album->images.head; img != nil; img = img->next){
 		if(img->thumb == nil)
 			continue;
 		drawthumb(img);
@@ -225,7 +408,7 @@ hover(Point p)
 	album->hover = nil;
 	if(prev != nil)
 		drawthumb(prev);
-	for(img = album->images; img != nil; img = img->next){
+	for(img = album->images.head; img != nil; img = img->next){
 		if(img->thumb == nil)
 			continue;
 		if(ptinrect(p, img->box)){
@@ -259,6 +442,42 @@ clicked(int btns)
 		togglesel(album->hover);
 }
 
+static Album*
+findnextalbum1(Album *a, int step)
+{
+	int i, m;
+	YearIdx *y;
+
+	y = a->up;
+	m = a->month + step;
+	while(y != nil){
+		for(i = m; 0 <= i && i < 12; i += step){
+			if(y->months[i] != nil)
+				return y->months[i];
+		}
+		if(step > 0){
+			y = y->next;
+			m = 0;
+		}else{
+			y = y->prev;
+			m = 11;
+		}
+	}
+	return nil;
+}
+
+static Album*
+findnextalbum(Album *a)
+{
+	return findnextalbum1(a, +1);
+}
+
+static Album*
+findprevalbum(Album *a)
+{
+	return findnextalbum1(a, -1);
+}
+
 static void
 usage(char *argv0)
 {
@@ -269,10 +488,13 @@ usage(char *argv0)
 void
 threadmain(int argc, char **argv)
 {
+	int i;
+	YearIdx *y;
 	Keyboardctl *kc;
 	Mousectl *mc;
 	Rune r;
 	int buttons;
+	Album *next;
 
 	ARGBEGIN{
 	default:
@@ -284,9 +506,23 @@ threadmain(int argc, char **argv)
 		sysfatal("initkeyboard: %r");
 	if((mc = initmouse(nil, screen)) == nil)
 		sysfatal("initmouse: %r");
-	album = openalbum();
+	db = openimgdb(".");
+	if(db == nil)
+		sysfatal("openimgdb: %r");
+	for(y = db->years; y != nil; y = y->next){
+		for(i = 11; i >= 0; i--){
+			if(y->months[i] != nil)
+			if(y->months[i]->images.head != nil){
+				album = db->years->months[i];
+				goto AlbumSelected;
+			}
+		}
+	}
+AlbumSelected:
 	if(album == nil)
-		sysfatal("openalbum: %r");
+		sysfatal("no album");
+	if(album->images.head == nil)
+		sysfatal("no images");
 	resized(0);
 	buttons = 0;
 	for(;;){
@@ -315,6 +551,18 @@ threadmain(int argc, char **argv)
 			case Kdel:
 			case 'q':
 				threadexitsall(nil);
+				break;
+			case Kleft:
+				if((next = findprevalbum(album)) != nil){
+					album = next;
+					resized(0);
+				}
+				break;
+			case Kright:
+				if((next = findnextalbum(album)) != nil){
+					album = next;
+					resized(0);
+				}
 				break;
 			}
 			break;
