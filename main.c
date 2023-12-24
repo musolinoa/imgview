@@ -217,7 +217,7 @@ static int
 openalbum1(char *path, Dir *e, void *a)
 {
 	Album *album;
-	AlbumImg *img;
+	Img *img;
 	char buf[1024];
 
 	album = a;
@@ -226,17 +226,17 @@ openalbum1(char *path, Dir *e, void *a)
 	if(!endswith(e->name, ".thumb.1"))
 		return 0;
 	snprint(buf, sizeof(buf), "%s/%s", path, e->name);
-	img = loadalbumimg(buf);
+	img = loadimg(buf);
 	if(img == nil)
 		return -1;
 	img->up = album;
-	if(album->images.head == nil){
-		album->images.head = img;
+	if(album->images->head == nil){
+		album->images->head = img;
 	}else{
-		album->images.tail->next = img;
-		img->prev = album->images.tail;
+		album->images->tail->next = img;
+		img->prev = album->images->tail;
 	}
-	album->images.tail = img;
+	album->images->tail = img;
 	return 1;
 }
 
@@ -248,7 +248,7 @@ openalbum(char *path)
 	album = mallocz(sizeof(Album), 1);
 	if(album == nil)
 		return nil;
-	if(dirforeach(path, openalbum1, album) < 0){
+	if((album->path = strdup(path)) == nil){
 		freealbum(album);
 		return nil;
 	}
@@ -269,16 +269,16 @@ load9img(char *path)
 	return img;
 }
 
-AlbumImg *
-loadalbumimg(char *path)
+Img *
+loadimg(char *path)
 {
-	AlbumImg *aimg;
+	Img *aimg;
 	Image *img;
 
 	img = load9img(path);
 	if(img == nil)
 		goto Error;
-	aimg = mallocz(sizeof(AlbumImg), 1);
+	aimg = mallocz(sizeof(Img), 1);
 	if(aimg == nil)
 		goto Error;
 	aimg->name = trimsuffix(path, ".thumb.1");
@@ -290,7 +290,7 @@ Error:
 }
 
 void
-freealbumimg(AlbumImg *img)
+freeimg(Img *img)
 {
 	if(img == nil)
 		return;
@@ -302,17 +302,26 @@ freealbumimg(AlbumImg *img)
 void
 freealbum(Album *album)
 {
-	AlbumImg *img, *tmp;
-
 	if(album == nil)
 		return;
-	img = album->images.head;
+	freeimglist(album->images);
+	free(album);
+}
+
+void
+freeimglist(ImgList *list)
+{
+	Img *img, *tmp;
+
+	if(list == nil)
+		return;
+	img = list->head;
 	while(img != nil){
 		tmp = img;
 		img = img->next;
 		free(tmp);
 	}
-	free(album);
+	free(list);
 }
 
 enum{
@@ -320,14 +329,15 @@ enum{
 };
 
 static void
-reflow(Album *a, Rectangle bbox)
+reflow(Album *album, Rectangle bbox)
 {
 	int w, h;
-	AlbumImg *i;
+	Img *i;
 	Rectangle r;
 
 	r = bbox;
-	for(i = a->images.head; i != nil; i = i->next){
+	if(album->images != nil)
+	for(i = album->images->head; i != nil; i = i->next){
 		if(i->thumb == nil)
 			continue;
 		w = Dx(i->thumb->r);
@@ -349,7 +359,7 @@ static ImgDB *db;
 static Album *album;
 
 void
-drawthumb(AlbumImg *i)
+drawthumb(Img *i)
 {
 	static Image *fill;
 	Rectangle r;
@@ -374,7 +384,7 @@ void
 resized(int new)
 {
 	Rectangle box;
-	AlbumImg *img;
+	Img *img;
 	char buf[1024];
 
 	if(new && getwindow(display, Refnone) < 0)
@@ -390,7 +400,8 @@ resized(int new)
 	box.min.y -= Spacing;
 	box.max.y -= 40;
 	reflow(album, box);
-	for(img = album->images.head; img != nil; img = img->next){
+	if(album->images != nil)
+	for(img = album->images->head; img != nil; img = img->next){
 		if(img->thumb == nil)
 			continue;
 		drawthumb(img);
@@ -401,14 +412,14 @@ resized(int new)
 void
 hover(Point p)
 {
-	AlbumImg *img, *prev;
+	Img *img, *prev;
 	Rectangle r;
 
 	prev = album->hover;
 	album->hover = nil;
 	if(prev != nil)
 		drawthumb(prev);
-	for(img = album->images.head; img != nil; img = img->next){
+	for(img = album->images->head; img != nil; img = img->next){
 		if(img->thumb == nil)
 			continue;
 		if(ptinrect(p, img->box)){
@@ -427,7 +438,7 @@ hover(Point p)
 }
 
 void
-togglesel(AlbumImg *i)
+togglesel(Img *i)
 {
 	i->selected = !i->selected;
 	drawthumb(i);
@@ -511,8 +522,7 @@ threadmain(int argc, char **argv)
 		sysfatal("openimgdb: %r");
 	for(y = db->years; y != nil; y = y->next){
 		for(i = 11; i >= 0; i--){
-			if(y->months[i] != nil)
-			if(y->months[i]->images.head != nil){
+			if(y->months[i] != nil){
 				album = db->years->months[i];
 				goto AlbumSelected;
 			}
@@ -521,8 +531,8 @@ threadmain(int argc, char **argv)
 AlbumSelected:
 	if(album == nil)
 		sysfatal("no album");
-	if(album->images.head == nil)
-		sysfatal("no images");
+	if((album->images = mallocz(sizeof(ImgList), 1)) != nil)
+		dirforeach(album->path, openalbum1, album);
 	resized(0);
 	buttons = 0;
 	for(;;){
@@ -555,12 +565,18 @@ AlbumSelected:
 			case Kleft:
 				if((next = findprevalbum(album)) != nil){
 					album = next;
+					if(album->images == nil)
+					if((album->images = mallocz(sizeof(ImgList), 1)) != nil)
+						dirforeach(album->path, openalbum1, album);
 					resized(0);
 				}
 				break;
 			case Kright:
 				if((next = findnextalbum(album)) != nil){
 					album = next;
+					if(album->images == nil)
+					if((album->images = mallocz(sizeof(ImgList), 1)) != nil)
+						dirforeach(album->path, openalbum1, album);
 					resized(0);
 				}
 				break;

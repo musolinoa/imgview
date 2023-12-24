@@ -7,5 +7,7 @@ void freeyearidx(YearIdx*);
 Album *openalbum(char*);
 void freealbum(Album*);
 
-AlbumImg *loadalbumimg(char*);
-void freealbumimg(AlbumImg*);
+Img *loadimg(char*);
+void freeimg(Img*);
+
+void freeimglist(ImgList*);

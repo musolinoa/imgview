@@ -1,28 +1,32 @@
 typedef struct Album Album;
-typedef struct AlbumImg AlbumImg;
+typedef struct Img Img;
+typedef struct ImgList ImgList;
 typedef struct YearIdx YearIdx;
 typedef struct ImgDB ImgDB;
 typedef struct TagIdx TagIdx;
 typedef struct TagPvt TagPvt;
 typedef struct TagDB TagDB;
 
+struct ImgList
+{
+	Img *head;
+	Img *tail;
+};
+
 struct Album
 {
 	YearIdx *up;
 	int month;
-	struct
-	{
-		AlbumImg *head;
-		AlbumImg *tail;
-	} images;
-	AlbumImg *hover;
+	char *path;
+	ImgList *images;
+	Img *hover;
 };
 
-struct AlbumImg
+struct Img
 {
 	Album *up;
-	AlbumImg *next;
-	AlbumImg *prev;
+	Img *next;
+	Img *prev;
 	char *name;
 	Image *thumb;
 	Rectangle box;
